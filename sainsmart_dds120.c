@@ -63,6 +63,22 @@ void suspend_isr(void) __interrupt SUSPEND_ISR
 	CLEAR_SUSPEND();
 }
 
+BYTE triggered = 0;
+
+void timer0_isr(void) __interrupt TF0_ISR
+{
+	PA7 = (IOE&0x04) >> 2;
+	triggered = triggered || PA7;
+	TF0 = 0;
+}
+
+void timer1_isr(void) __interrupt TF1_ISR
+{
+	PA7 = (IOE^0x04) >> 2;
+	triggered = triggered || PA7;
+	TF0 = 0;
+}
+
 void timer2_isr(void) __interrupt TF2_ISR
 {
 	/* Toggle the 1kHz pin, only accurate up to ca 8MHz */
@@ -372,6 +388,62 @@ static BOOL set_calibration_pulse(BYTE fs)
 	}
 }
 
+/* Turn off all timers */
+static void stop_timers(void)
+{
+	TR0 = 0;
+	ET0 = 0;
+	TR1 = 0;
+	ET1 = 0;
+	TR2 = 0;
+	ET2 = 0;
+}
+
+/* Returns TRUE on trigger detect */
+static BOOL handle_trigger(BYTE fs)
+{
+	switch(fs) {
+		case 0:	// setup low trigger
+			stop_sampling();
+			stop_timers();
+			OEE = 0xFB;
+			PA7 = 0;
+			start_sampling();
+			ET0 = 1;
+			TR0 = 1;
+			triggered = 0;
+			SETCPUFREQ(CLK_48M);
+			return FALSE;
+		case 1:	// setup high trigger
+			stop_sampling();
+			stop_timers();
+			OEE = 0xFB;
+			PA7 = 0;
+			triggered = 0;
+			start_sampling();
+			ET1 = 1;
+			TR1 = 1;
+			SETCPUFREQ(CLK_48M);
+			return FALSE;
+		case 2:	// check trigger state
+			if (triggered)
+				return TRUE;
+			else
+				return FALSE;
+		case 3:	// setup non trigger mode
+			stop_sampling();
+			stop_timers();
+			OEE = 0xFF;
+			PA7 = 1;
+			ET2 = 1;
+			TR2 = 1;
+			SETCPUFREQ(CLK_12M);
+			return FALSE;
+		default:
+			return FALSE;
+	}
+}
+
 /* Set *alt_ifc to the current alt interface for ifc. */
 BOOL handle_get_interface(BYTE ifc, BYTE *alt_ifc)
 {
@@ -415,7 +487,7 @@ BOOL handle_vendorcommand(BYTE cmd)
 	stop_sampling();
 
 	/* Clear EP0BCH/L for each valid command. */
-	if (cmd >= 0xe0 && cmd <= 0xe6) {
+	if (cmd >= 0xe0 && cmd <= 0xe7) {
 		EP0BCH = 0;
 		EP0BCL = 0;
 		while (EP0CS & bmEPBUSY);
@@ -441,6 +513,9 @@ BOOL handle_vendorcommand(BYTE cmd)
 		return TRUE;
 	case 0xe6:
 		set_calibration_pulse(EP0BUF[0]);
+		return TRUE;
+	case 0xe7:
+		handle_trigger(EP0BUF[0]);
 		return TRUE;
 	}
 
@@ -486,6 +561,13 @@ static void main(void)
 	/* Global (8051) interrupt enable. */
 	EA = 1;
 
+	/* Init timer 0 and 1, 8-bit auto-reload */
+	TMOD = 0x22;
+	TL0 = 0x00;
+	TH0 = 0xFF;
+	TL1 = 0x00;
+	TH1 = 0xFF;
+
 	/* Init timer2. */
 	RCAP2L = -1000 & 0xff;
 	RCAP2H = (-1000 >> 8) & 0xff;
@@ -502,6 +584,7 @@ static void main(void)
 	OEC = 0xff;
 	OEA = 0x80;
 
+	/* connected to RDY0 pin */
 	PA7 = 1;
 
 	while (TRUE) {
